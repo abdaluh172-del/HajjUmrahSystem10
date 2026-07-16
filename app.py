@@ -39,6 +39,8 @@ Admin-only endpoints (require "Authorization: Bearer <token>" from login):
     /api/users (all methods), PUT/DELETE /api/comments/<id>
 Write endpoint (admin or registered user token required):
     POST /api/comments
+Deployment: init_db() runs at import time, so the app works out of the box
+under Gunicorn on Render — no manual database creation needed.
 """
 import os
 import io
@@ -70,9 +72,10 @@ CATEGORIES = ["Services", "Crowd Management", "Transportation", "Food",
 #   guest -> no account: view only
 VALID_ROLES = ("admin", "user", "guest")
 ASSIGNABLE_ROLES = ("user", "guest")  # 'admin' can never be granted to anyone
-ADMIN_EMAIL = "abdullah1222@gmail.com"  # fixed admin — cannot be deleted or demoted
-ADMIN_PASSWORD = "Ab1231234"
-LEGACY_ADMIN_EMAIL = "admin@hajj.sa"    # old seeded admin — migrated automatically
+ADMIN_EMAIL = "abdullah2222@ghjj.sa"  # fixed admin — cannot be deleted or demoted
+ADMIN_PASSWORD = "A1231234"
+# Old admin emails from previous versions — migrated automatically to the new one.
+LEGACY_ADMIN_EMAILS = ("abdullah1222@gmail.com", "admin@hajj.sa")
 SECRET_KEY = os.environ.get("SECRET_KEY", "hajj-umrah-dev-secret-change-in-production")
 TOKEN_MAX_AGE = 60 * 60 * 12  # 12 hours
 _serializer = URLSafeTimedSerializer(SECRET_KEY, salt="auth-token")
@@ -143,12 +146,16 @@ def init_db():
     admin_row = conn.execute("SELECT id, role FROM users WHERE lower(email)=?",
                              (ADMIN_EMAIL,)).fetchone()
     if admin_row is None:
-        # Migrate the old seeded admin (if this DB predates the email change).
-        legacy = conn.execute("SELECT id FROM users WHERE lower(email)=?",
-                              (LEGACY_ADMIN_EMAIL,)).fetchone()
+        # Migrate an old seeded admin (if this DB predates the email change).
+        legacy = None
+        for old_email in LEGACY_ADMIN_EMAILS:
+            legacy = conn.execute("SELECT id FROM users WHERE lower(email)=?",
+                                  (old_email,)).fetchone()
+            if legacy:
+                break
         if legacy:
             conn.execute(
-                "UPDATE users SET email=?, password_hash=?, role='admin' WHERE id=?",
+                "UPDATE users SET name='Admin User', email=?, password_hash=?, role='admin' WHERE id=?",
                 (ADMIN_EMAIL, generate_password_hash(ADMIN_PASSWORD), legacy[0]),
             )
             print(f"Migrated fixed admin -> {ADMIN_EMAIL}")
@@ -187,6 +194,15 @@ def init_db():
             )
         conn.commit()
     conn.close()
+
+
+# Create the database (comments + users tables), seed data, and ensure the
+# fixed admin exists — at IMPORT time, not just under `python app.py`.
+# Render runs the app with Gunicorn (`gunicorn app:app`), which imports this
+# module and never executes the `if __name__ == "__main__"` block; without
+# this call the first request would crash with
+# "sqlite3.OperationalError: no such table: users".
+init_db()
 
 
 # ---------------------------------------------------------------- #
@@ -594,5 +610,7 @@ def dashboard_stats():
 
 
 if __name__ == "__main__":
+    # init_db() already ran at import time above (needed for Gunicorn/Render);
+    # calling it again here is harmless — everything it does is idempotent.
     init_db()
-    app.run(host="0.0.0.0", port=int(os.environ.get("PORT",5000)))
+    app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 5000)))
